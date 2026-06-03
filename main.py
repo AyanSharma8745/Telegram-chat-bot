@@ -1,21 +1,26 @@
 import os
 import requests
 from flask import Flask, request
+from google import genai
 
 app = Flask(__name__)
 
-# Replit ke Secrets se aayenge
+# ====== ENV / SECRETS ======
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
+if not TELEGRAM_TOKEN:
+    print("ERROR: TELEGRAM_BOT_TOKEN env variable missing.")
+if not GOOGLE_API_KEY:
+    print("ERROR: GOOGLE_API_KEY env variable missing.")
+
+# Gemini client
+client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+
 TELEGRAM_SEND_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-# Har user (chat_id) ki history yahan store hogi:
-# { chat_id: [ {role: "user"/"model", parts: [{text: "..."}]}, ... ] }
-conversations = {}
-
-# Kitne last turns yaad rakhne hai (1 turn = user + bot)
-MAX_TURNS = 6
+# ====== AKANE PERSONA ======
 
 AKANE_SYSTEM_PROMPT = """
 Tum ek virtual AI chat companion ho jiska naam Akane Sharma hai.
@@ -34,11 +39,22 @@ Rules:
   lekin explicit, adult, ya sexual content bilkul nahi.
 """
 
+# ====== MULTI-USER MEMORY ======
+
+# { chat_id: [ {role: "user"/"model", parts: [{"text": "..."}]}, ... ] }
+conversations = {}
+
+# Har user ke liye kitne last turns (user+bot) yaad rakhne:
+MAX_TURNS = 6
+
+
 def build_contents_for_user(chat_id: int, user_text: str):
-    """Is user ke liye history + naya message bana kar contents return karta hai."""
+    """
+    Is user ke liye history + naya message mila kar
+    Gemini ko dene layak contents return karta hai.
+    """
     history = conversations.get(chat_id, [])
 
-    # Naya user message add karo
     new_history = history + [
         {"role": "user", "parts": [{"text": user_text}]}
     ]
@@ -47,15 +63,15 @@ def build_contents_for_user(chat_id: int, user_text: str):
 
 
 def save_reply_to_history(chat_id: int, contents, bot_reply_text: str):
-    """AI ka reply history me add karta hai, aur history ko limit ke andar rakhta hai."""
-    # contents ke end me model ka reply add karo
+    """
+    Model ke reply ko history me add karta hai aur
+    history ka size limit ke andar rakhta hai.
+    """
     new_history = contents + [
         {"role": "model", "parts": [{"text": bot_reply_text}]}
     ]
 
-    # Sirf last MAX_TURNS turns (user+bot) hi rakho
-    # 1 turn = 2 messages (user + model), to max_messages = MAX_TURNS * 2
-    max_messages = MAX_TURNS * 2
+    max_messages = MAX_TURNS * 2  # 1 turn = user + model
     if len(new_history) > max_messages:
         new_history = new_history[-max_messages:]
 
@@ -63,57 +79,45 @@ def save_reply_to_history(chat_id: int, contents, bot_reply_text: str):
 
 
 def ask_akane(chat_id: int, user_text: str) -> str:
-    """User ke message ka reply Google AI se laata hai, per-user history ke saath."""
-
-    if not GOOGLE_API_KEY:
+    """
+    User ke message ka reply Gemini 3.5 Flash se laata hai,
+    per-user history ke saath.
+    """
+    if not GOOGLE_API_KEY or client is None:
         return "Meri settings me thoda issue hai (API key missing). Owner ko check karne bolo."
 
-    # Is user ke liye contents (history + naya text) banao
     contents = build_contents_for_user(chat_id, user_text)
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "system_instruction": {
-            "role": "system",
-            "parts": [{"text": AKANE_SYSTEM_PROMPT}],
-        },
-        "contents": contents,
-        "generation_config": {
-            "temperature": 0.9,
-            "max_output_tokens": 256,
-        },
-    }
-
-    params = {"key": GOOGLE_API_KEY}
-
     try:
-        resp = requests.post(
-            url,
-            headers=headers,
-            params=params,
-            json=payload,
-            timeout=20,
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=contents,
+            config={
+                "temperature": 0.9,
+                "max_output_tokens": 256,
+                "system_instruction": AKANE_SYSTEM_PROMPT,
+            },
         )
-        resp.raise_for_status()
-        data = resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        reply = text.strip()
 
-        # Reply mil gaya, ab history update karo
+        reply = (response.text or "").strip()
+        if not reply:
+            reply = "Mujhe thoda confusion ho gaya, fir se likhoge kya?"
+
         save_reply_to_history(chat_id, contents, reply)
 
         return reply
 
     except Exception as e:
-        print("Error from Google AI API:", e)
+        # Debug ke liye console me print karo
+        print("Error from Google AI API:", repr(e))
         return "Abhi thoda technical issue aa raha hai, thodi der baad phir try karna."
 
 
+# ====== FLASK ROUTES ======
+
 @app.route("/", methods=["GET"])
 def home():
-    return "Akane multi-user bot is running on Replit."
+    return "Akane multi-user bot (Gemini 3.5 Flash) is running on Replit."
 
 
 @app.route("/webhook", methods=["POST"])
@@ -130,7 +134,7 @@ def telegram_webhook():
     chat_id = message["chat"]["id"]
     text = message.get("text")
     if not text:
-        # Non‑text messages ignore
+        # Non-text messages ignore
         return "ok"
 
     cleaned = text.strip()
@@ -139,7 +143,7 @@ def telegram_webhook():
     if cleaned.lower() in ("/reset", "/startreset", "reset"):
         if chat_id in conversations:
             conversations.pop(chat_id, None)
-        reset_msg = "Maine hamari chat memory reset kar di 🧹. Ab hum fresh se baat kar sakte hain."
+        reset_msg = "Maine hamari chat memory reset kar di. Ab hum fresh se baat kar sakte hain. 🙂"
         try:
             requests.post(
                 TELEGRAM_SEND_URL,
@@ -148,6 +152,23 @@ def telegram_webhook():
             )
         except Exception as e:
             print("Error sending reset msg to Telegram:", e)
+        return "ok"
+
+    # /start pe ek cute welcome
+    if cleaned.lower() == "/start":
+        welcome = (
+            "Hey, main Akane Sharma hoon, tumhari virtual AI chat companion. 💕\n"
+            "Bas yaad rakhna, main ek AI hoon, real insaan nahi.\n\n"
+            "Jo mann me ho, mujhe likh sakte ho. Agar kabhi memory clear karni ho to /reset type karna. 🙂"
+        )
+        try:
+            requests.post(
+                TELEGRAM_SEND_URL,
+                json={"chat_id": chat_id, "text": welcome},
+                timeout=10,
+            )
+        except Exception as e:
+            print("Error sending /start msg to Telegram:", e)
         return "ok"
 
     # Normal message → AI se reply lo
