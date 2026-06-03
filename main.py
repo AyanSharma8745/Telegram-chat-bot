@@ -76,7 +76,7 @@ def ask_akane(chat_id: int, user_text: str) -> str:
 
     contents = build_contents_for_user(chat_id, user_text)
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent"
 
     headers = {"Content-Type": "application/json"}
     params = {"key": GOOGLE_API_KEY}
