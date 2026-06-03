@@ -5,8 +5,8 @@ from flask import Flask, request
 app = Flask(__name__)
 
 # Replit ke Secrets se aayenge
-TELEGRAM_TOKEN = os.environ.get("8601850840:AAE0tPjpyzOkMLSu-0K5KlWKDtccwlqekZk")
-GOOGLE_API_KEY = os.environ.get("AQ.Ab8RN6JcpT5NfdCXEEctEFFJw10GmoJ7b3ZxORDXMdd8HrnJJQ")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 TELEGRAM_SEND_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
