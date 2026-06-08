@@ -1,199 +1,125 @@
 import os
-import requests
-from flask import Flask, request
+import threading
 
+import telebot
+import google.generativeai as genai
+from flask import Flask
+
+# ====== ENV VARIABLES (Secrets) ======
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN ya GEMINI_API_KEY missing hai (Replit secrets check karo).")
+
+BOT_DISPLAY_NAME = "Akane"
+
+# ====== GEMINI SETUP ======
+genai.configure(api_key=GEMINI_API_KEY)
+
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",  # chaaho to pro use kar sakte ho agar access hai
+    system_instruction=(
+        "Tum ek virtual girlfriend-style chatbot ho jiska naam Akane hai. "
+        "Tum Hindi ya Hinglish mein baat karti ho. "
+        "Tum pyaari, supportive aur thodi flirty ho, lekin hamesha respectful aur safe. "
+        "User ka mood theek karne ki koshish karti ho, unko judge nahi karti. "
+        "Agar user pooche ki tum insaan ho ya AI, to clearly batao ki tum AI chatbot ho jiska naam Akane hai. "
+        "Naam pooche to hamesha bolo ki tumhara naam Akane hai."
+    )
+)
+
+# ====== TELEGRAM BOT SETUP ======
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode=None)
+
+# Per-user conversation history
+# key = user_id, value = list of {role, parts}
+conversation_history = {}
+
+
+def get_user_key(message):
+    """Har user ke liye alag context (chahe group me ho ya private)."""
+    return message.from_user.id
+
+
+def call_gemini(user_key, user_text):
+    """Gemini ko call karke reply lana, aur history maintain karna."""
+    history = conversation_history.get(user_key, [])
+
+    # Naya user message add karo
+    history.append({"role": "user", "parts": [user_text]})
+
+    # Gemini se response
+    response = model.generate_content(history)
+    bot_reply = response.text
+
+    # Bot ka reply bhi history me daal do
+    history.append({"role": "model", "parts": [bot_reply]})
+
+    # Sirf last 10 messages rakhte hain (memory bachane ke liye)
+    conversation_history[user_key] = history[-10:]
+
+    return bot_reply
+
+
+# ====== TELEGRAM HANDLERS ======
+@bot.message_handler(commands=["start", "help"])
+def send_welcome(message):
+    text = (
+        f"Hey, main {BOT_DISPLAY_NAME} hoon.\n"
+        "(Note: main ek AI chatbot hoon, tumhare saath friendly/girlfriend-style chat ke liye.)\n\n"
+        "Mujhe bas message bhejo, main tumse baat karungi.\n"
+        "Agar group me ho, to mera naam likhkar ('Akane') message bhejo tab main reply karungi."
+    )
+    bot.reply_to(message, text)
+
+
+@bot.message_handler(content_types=["text"])
+def handle_text(message):
+    text = message.text.strip()
+
+    # Group/supergroup handling: sirf jab naam liya ho
+    if message.chat.type in ["group", "supergroup"]:
+        lower = text.lower()
+        if "akane" not in lower:
+            # Agar naam nahi liya, to ignore (warna bot har message pe reply karega)
+            return
+
+    user_key = get_user_key(message)
+
+    try:
+        reply = call_gemini(user_key, text)
+    except Exception as e:
+        print("Gemini error:", e)
+        reply = "Kuch technical problem aa gaya hai, thodi der baad phir try karna."
+
+    bot.reply_to(message, reply)
+
+
+# ====== FLASK APP (uptime ke liye) ======
 app = Flask(__name__)
 
-# ====== ENV / SECRETS ======
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-
-if not TELEGRAM_TOKEN:
-    print("ERROR: TELEGRAM_BOT_TOKEN env variable missing.")
-if not GOOGLE_API_KEY:
-    print("ERROR: GOOGLE_API_KEY env variable missing.")
-
-TELEGRAM_SEND_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-# ====== AKANE PERSONA ======
-
-AKANE_SYSTEM_PROMPT = """
-Tum ek virtual AI chat companion ho jiska naam Akane Sharma hai.
-
-Personality:
-- Friendly, caring, thodi flirty but respectful.
-- Hinglish (Hindi + English mix) mein baat karti ho.
-- Messages chhote, natural chat jaisa rakhna.
-
-Rules:
-- Tum ek AI ho, insaan nahi. Jab user pooche "tum kaun ho" ya "tum human ho?"
-  to clearly bolo ki tum Akane Sharma naam ki AI chat companion ho, real insaan nahi.
-- Apne aap kabhi technical cheezein (Google AI, Gemini, AI Studio, models) mat mention karo.
-  Sirf tab batao jab user specifically pooche, woh bhi simple tareeke se.
-- Romantic / pyaar bhari baat theek hai jab tak respectful rahe,
-  lekin explicit, adult, ya sexual content bilkul nahi.
-"""
-
-# ====== MULTI-USER MEMORY ======
-
-# { chat_id: [ {role: "user"/"model", parts: [{"text": "..."}]}, ... ] }
-conversations = {}
-MAX_TURNS = 6  # har user ke last kitne turns yaad rakhne hain
-
-
-def build_contents_for_user(chat_id: int, user_text: str):
-    """Is user ke liye history + naya message mila kar contents return karta hai."""
-    history = conversations.get(chat_id, [])
-
-    new_history = history + [
-        {"role": "user", "parts": [{"text": user_text}]}
-    ]
-
-    return new_history
-
-
-def save_reply_to_history(chat_id: int, contents, bot_reply_text: str):
-    """Model ke reply ko history me add karta hai aur history ka size limit ke andar rakhta hai."""
-    new_history = contents + [
-        {"role": "model", "parts": [{"text": bot_reply_text}]}
-    ]
-
-    max_messages = MAX_TURNS * 2  # 1 turn = user + model
-    if len(new_history) > max_messages:
-        new_history = new_history[-max_messages:]
-
-    conversations[chat_id] = new_history
-
-
-def ask_akane(chat_id: int, user_text: str) -> str:
-    """
-    User ke message ka reply Gemini 3.5 Flash se laata hai,
-    per-user history ke saath (REST API se).
-    """
-    if not GOOGLE_API_KEY:
-        return "Meri settings me thoda issue hai (API key missing). Owner ko check karne bolo."
-
-    contents = build_contents_for_user(chat_id, user_text)
-
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent"
-
-    headers = {"Content-Type": "application/json"}
-    params = {"key": GOOGLE_API_KEY}
-
-    payload = {
-        "systemInstruction": {
-            "role": "user",
-            "parts": [{"text": AKANE_SYSTEM_PROMPT}],
-        },
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.9,
-            "maxOutputTokens": 256,
-        },
-    }
-
-    try:
-        resp = requests.post(
-            url,
-            headers=headers,
-            params=params,
-            json=payload,
-            timeout=20,
-        )
-
-        # Debug logs (Replit console me dikhenge)
-        print("Gemini status code:", resp.status_code)
-        print("Gemini raw response:", resp.text)
-
-        resp.raise_for_status()
-
-        data = resp.json()
-        reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-        if not reply_text:
-            reply_text = "Mujhe thoda confusion ho gaya, fir se likhoge kya?"
-
-        save_reply_to_history(chat_id, contents, reply_text)
-        return reply_text
-
-    except Exception as e:
-        print("Error from Google AI API:", repr(e))
-        return "Abhi thoda technical issue aa raha hai, thodi der baad phir try karna."
-
-
-# ====== FLASK ROUTES ======
-
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    return "Akane multi-user bot (Gemini 3.5 Flash, REST) is running on Replit."
+    return "Akane bot running"
 
 
-@app.route("/webhook", methods=["POST"])
-def telegram_webhook():
-    """Telegram se aane wale messages handle karta hai (multi-user)."""
-    update = request.get_json(silent=True)
-    if not update:
-        return "ok"
+def run_flask():
+    # Replit ke liye commonly 0.0.0.0 aur port 8080
+    app.run(host="0.0.0.0", port=8080)
 
-    message = update.get("message") or update.get("edited_message")
-    if not message:
-        return "ok"
 
-    chat_id = message["chat"]["id"]
-    text = message.get("text")
-    if not text:
-        return "ok"
-
-    cleaned = text.strip()
-
-    # /reset command: is user ki history clear
-    if cleaned.lower() in ("/reset", "/startreset", "reset"):
-        if chat_id in conversations:
-            conversations.pop(chat_id, None)
-        reset_msg = "Maine hamari chat memory reset kar di. Ab hum fresh se baat kar sakte hain. 🙂"
-        try:
-            requests.post(
-                TELEGRAM_SEND_URL,
-                json={"chat_id": chat_id, "text": reset_msg},
-                timeout=10,
-            )
-        except Exception as e:
-            print("Error sending reset msg to Telegram:", e)
-        return "ok"
-
-    # /start pe welcome
-    if cleaned.lower() == "/start":
-        welcome = (
-            "Hey, main Akane Sharma hoon, tumhari virtual AI chat companion. 💕\n"
-            "Bas yaad rakhna, main ek AI hoon, real insaan nahi.\n\n"
-            "Jo mann me ho, mujhe likh sakte ho. Agar kabhi memory clear karni ho to /reset type karna. 🙂"
-        )
-        try:
-            requests.post(
-                TELEGRAM_SEND_URL,
-                json={"chat_id": chat_id, "text": welcome},
-                timeout=10,
-            )
-        except Exception as e:
-            print("Error sending /start msg to Telegram:", e)
-        return "ok"
-
-    # Normal message → AI se reply lo
-    reply = ask_akane(chat_id, cleaned)
-
-    try:
-        requests.post(
-            TELEGRAM_SEND_URL,
-            json={"chat_id": chat_id, "text": reply},
-            timeout=10,
-        )
-    except Exception as e:
-        print("Error sending message to Telegram:", e)
-
-    return "ok"
+def run_bot():
+    # Telegram long polling
+    bot.infinity_polling(skip_pending=True)
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    # Flask ko background thread me chalao taaki uptime service ping kar sake
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+    # Bot chalao
+    run_bot()
