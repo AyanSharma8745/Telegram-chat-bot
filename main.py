@@ -17,8 +17,10 @@ BOT_DISPLAY_NAME = "Akane"
 # ====== GROQ SETUP ======
 client = Groq(api_key=GROQ_API_KEY)
 
-# Groq model name (chaaho to change kar sakte ho)
+# Groq model name
 GROQ_MODEL = "llama3-8b-8192"
+# better quality ke liye (agar chaho):
+# GROQ_MODEL = "llama3-70b-8192"
 
 SYSTEM_PROMPT = (
     "Tum ek virtual girlfriend-style chatbot ho jiska naam Akane hai. "
