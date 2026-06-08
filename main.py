@@ -67,9 +67,9 @@ def call_gemini(user_key, user_text):
 def send_welcome(message):
     text = (
         f"Hey, main {BOT_DISPLAY_NAME} hoon.\n"
-        "(Note: main ek AI chatbot hoon, tumhare saath friendly/girlfriend-style chat ke liye.)\n\n"
-        "Mujhe bas message bhejo, main tumse baat karungi.\n"
-        "Agar group me ho, to mera naam likhkar ('Akane') message bhejo tab main reply karungi."
+        "(Note: main ek real girl bot hu.)\n\n"
+        "Kuch bhi baat kar sakhti aap ek bare msg kare mere master.\n"
+        "Agar group me ho, to mera naam likhkar ('Akane') message karo master tabhi mai aapko replay karugi nhi."
     )
     bot.reply_to(message, text)
 
